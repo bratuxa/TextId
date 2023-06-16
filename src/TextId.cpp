@@ -2,7 +2,10 @@
 
 #include <fmt/format.h>
 
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/locale/conversion.hpp>
 #include <functional>
+#include <memory>
 #include <string>
 #include <userver/clients/dns/component.hpp>
 #include <userver/server/handlers/http_handler_base.hpp>
@@ -10,8 +13,10 @@
 #include <userver/storages/postgres/component.hpp>
 #include <userver/utils/assert.hpp>
 #include <userver/server/http/http_request.hpp>
+#include "userver/formats/json/serialize.hpp"
 #include "userver/storages/postgres/cluster_types.hpp"
 #include "userver/storages/postgres/exceptions.hpp"
+#include "userver/storages/postgres/result_set.hpp"
 
 namespace pg_service_template {
 
@@ -51,11 +56,42 @@ class Hello final : public userver::server::handlers::HttpHandlerBase {
       case userver::server::http::HttpMethod::kGet:{
         const auto request_body = userver::formats::json::FromString(request.RequestBody());
         const auto user_id = fmt::format("{}", request_body["user_id"]);
+        const auto paste_id = request_body.GetSize() > 1 ? fmt::format("{}", request_body["paste_id"]) : "";
+
+        std::unique_ptr<userver::storages::postgres::ResultSet> result;
+
+        if(paste_id.empty()){
+          result = std::make_unique<userver::storages::postgres::ResultSet>(pg_cluster_->Execute(
+            userver::storages::postgres::ClusterHostType::kMaster,
+            "SELECT paste FROM text_schema.pastes WHERE user_id = $1 AND time = (SELECT MAX(time)FROM text_schema.pastes)",
+            user_id
+          ));
+        }
+        else {
+          result = std::make_unique<userver::storages::postgres::ResultSet>(pg_cluster_->Execute(
+            userver::storages::postgres::ClusterHostType::kMaster,
+            "SELECT user_id, paste FROM text_schema.pastes WHERE paste_id = $1",
+            paste_id
+          ));
+        }
+
+        if(result->IsEmpty())
+          throw userver::server::handlers::ExceptionWithCode<HandlerErrorCode::kResourceNotFound>(userver::server::handlers::ExternalBody{});
+
+        if(!paste_id.empty() && user_id != (*result)[0]["user_id"].As<std::string>())
+          throw userver::server::handlers::ExceptionWithCode<HandlerErrorCode::kForbidden>(userver::server::handlers::ExternalBody{});
+
+        return (*result)[0]["paste"].As<std::string>();
+      }
+      break;
+      case userver::server::http::HttpMethod::kDelete:{
+        const auto request_body = userver::formats::json::FromString(request.RequestBody());
+        const auto user_id = fmt::format("{}", request_body["user_id"]);
         const auto paste_id = fmt::format("{}", request_body["paste_id"]);
 
         auto result = pg_cluster_->Execute(
           userver::storages::postgres::ClusterHostType::kMaster,
-          "SELECT user_id, paste FROM text_schema.pastes WHERE paste_id = $1",
+            "SELECT user_id, paste FROM text_schema.pastes WHERE paste_id = $1",
           paste_id
         );
 
@@ -64,8 +100,16 @@ class Hello final : public userver::server::handlers::HttpHandlerBase {
 
         if(user_id != result[0]["user_id"].As<std::string>())
           throw userver::server::handlers::ExceptionWithCode<HandlerErrorCode::kForbidden>(userver::server::handlers::ExternalBody{});
-        
-        return result[0]["paste"].As<std::string>();
+
+        result = pg_cluster_->Execute(
+          userver::storages::postgres::ClusterHostType::kMaster,
+            "DELETE FROM text_schema.pastes WHERE paste_id = $1 AND user_id = $2",
+          paste_id, user_id
+        );
+
+        request.SetResponseStatus(userver::server::http::HttpStatus::kNoContent);
+
+        return "";
       }
     }
   }
