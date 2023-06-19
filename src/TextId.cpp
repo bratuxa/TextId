@@ -13,10 +13,13 @@
 #include <userver/storages/postgres/component.hpp>
 #include <userver/utils/assert.hpp>
 #include <userver/server/http/http_request.hpp>
+#include <userver/formats/serialize/common_containers.hpp>
+#include "userver/formats/common/type.hpp"
 #include "userver/formats/json/serialize.hpp"
 #include "userver/storages/postgres/cluster_types.hpp"
 #include "userver/storages/postgres/exceptions.hpp"
 #include "userver/storages/postgres/result_set.hpp"
+#include <userver/storages/postgres/io/row_types.hpp>
 
 namespace pg_service_template {
 
@@ -67,6 +70,13 @@ class Hello final : public userver::server::handlers::HttpHandlerBase {
             user_id
           ));
         }
+        else if(paste_id == fmt::format("{}", "\"ALL\"")){
+          result = std::make_unique<userver::storages::postgres::ResultSet>(pg_cluster_->Execute(
+            userver::storages::postgres::ClusterHostType::kMaster,
+            "SELECT user_id, paste_id FROM text_schema.pastes WHERE user_id = $1 ORDER BY time DESC",
+            user_id
+          ));
+        }
         else {
           result = std::make_unique<userver::storages::postgres::ResultSet>(pg_cluster_->Execute(
             userver::storages::postgres::ClusterHostType::kMaster,
@@ -81,7 +91,15 @@ class Hello final : public userver::server::handlers::HttpHandlerBase {
         if(!paste_id.empty() && user_id != (*result)[0]["user_id"].As<std::string>())
           throw userver::server::handlers::ExceptionWithCode<HandlerErrorCode::kForbidden>(userver::server::handlers::ExternalBody{});
 
-        return (*result)[0]["paste"].As<std::string>();
+        if(paste_id == "\"ALL\""){
+          std::string temp = "";
+          for(auto i : *result){
+            temp += fmt::format("{{\"user_id\": {},\"paste_id\": {}}}", user_id, i["paste_id"].As<std::string>());
+          }
+          return temp;
+        } 
+
+        return fmt::format("{{\"user_id\": {},\"paste\": {}}}", user_id, (*result)[0]["paste"].As<std::string>());
       }
       break;
       case userver::server::http::HttpMethod::kDelete:{
